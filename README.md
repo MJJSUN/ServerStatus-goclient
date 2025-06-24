@@ -35,6 +35,8 @@ Usage of client:
 ```bash
 git clone https://github.com/MJJSUN/ServerStatus-goclient.git
 
+go get github.com/gorilla/websocket
+
 go build -o status-client ./cmd/client
 
 chmod +x status-client
