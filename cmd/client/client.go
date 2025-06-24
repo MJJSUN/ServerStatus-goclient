@@ -3,23 +3,30 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/cokemine/ServerStatus-goclient/pkg/status"
-	jsoniter "github.com/json-iterator/go"
 	"log"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cokemine/ServerStatus-goclient/pkg/status"
+	jsoniter "github.com/json-iterator/go"
+	"github.com/gorilla/websocket"
 )
 
 var (
-	SERVER   = flag.String("h", "", "Input the host of the server")
-	PORT     = flag.Int("port", 35601, "Input the port of the server")
-	USER     = flag.String("u", "", "Input the client's username")
-	PASSWORD = flag.String("p", "", "Input the client's password")
-	INTERVAL = flag.Float64("interval", 2.0, "Input the INTERVAL")
-	DSN      = flag.String("dsn", "", "Input DSN, format: username:password@host:port")
-	isVnstat = flag.Bool("vnstat", false, "Use vnstat for traffic statistics, linux only")
+	SERVER     = flag.String("h", "", "Input the host of the server")
+	PORT       = flag.Int("port", 35601, "Input the port of the server")
+	USER       = flag.String("u", "", "Input the client's username")
+	PASSWORD   = flag.String("p", "", "Input the client's password")
+	INTERVAL   = flag.Float64("interval", 2.0, "Input the INTERVAL")
+	DSN        = flag.String("dsn", "", "Input DSN, format: username:password@host:port")
+	isVnstat   = flag.Bool("vnstat", false, "Use vnstat for traffic statistics, linux only")
+	PROTOCOL   = flag.String("protocol", "tcp", "Protocol: tcp or websocket")
+	USE_SSL    = flag.Bool("ssl", false, "Use SSL for websocket connection")
+	PATH       = flag.String("path", "/", "WebSocket path")
+	VERBOSE    = flag.Bool("verbose", false, "Enable verbose logging")
 )
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
@@ -42,8 +49,274 @@ type ServerStatus struct {
 	Online6     bool            `json:"online6"`
 }
 
+type WebSocketConnection struct {
+	conn         *websocket.Conn
+	authenticated bool
+}
+
+func (ws *WebSocketConnection) ReadMessage() (string, error) {
+	if ws.conn == nil {
+		return "", fmt.Errorf("connection is closed")
+	}
+	
+	_, message, err := ws.conn.ReadMessage()
+	if err != nil {
+		return "", err
+	}
+	return string(message), nil
+}
+
+func (ws *WebSocketConnection) WriteMessage(message string) error {
+	if ws.conn == nil {
+		return fmt.Errorf("connection is closed")
+	}
+	
+	return ws.conn.WriteMessage(websocket.TextMessage, []byte(message))
+}
+
+func (ws *WebSocketConnection) Close() {
+	ws.conn.Close()
+}
+
+func websocketConnect() (*WebSocketConnection, error) {
+	// 确定协议方案
+	scheme := "ws"
+	if *USE_SSL {
+		scheme = "wss"
+	}
+	
+	// 清理主机地址
+	host := *SERVER
+	if strings.Contains(host, "://") {
+		host = strings.Split(host, "://")[1]
+	}
+	host = strings.Split(host, "/")[0]
+	
+	// 构造 WebSocket URL
+	u := url.URL{
+		Scheme: scheme,
+		Host:   fmt.Sprintf("%s:%d", host, *PORT),
+		Path:   *PATH,
+	}
+	
+	if *VERBOSE {
+		log.Printf("Connecting to WebSocket: %s", u.String())
+	}
+	
+	// 设置 WebSocket 拨号器
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 30 * time.Second,
+	}
+	
+	// 添加自定义头
+	headers := make(map[string][]string)
+	headers["User-Agent"] = []string{"ServerStatus-GoClient"}
+	headers["Sec-WebSocket-Protocol"] = []string{"server-status"}
+	
+	// 建立连接
+	conn, _, err := dialer.Dial(u.String(), headers)
+	if err != nil {
+		return nil, err
+	}
+	
+	ws := &WebSocketConnection{
+		conn:         conn,
+		authenticated: false,
+	}
+	
+	// 设置心跳
+	conn.SetPingHandler(func(appData string) error {
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
+	})
+	
+	// 设置关闭处理
+	conn.SetCloseHandler(func(code int, text string) error {
+		if *VERBOSE {
+			log.Printf("WebSocket closed: %d %s", code, text)
+		}
+		return nil
+	})
+	
+	return ws, nil
+}
+
+// ... 其他代码保持不变 ...
+
+func handleWebSocketAuthentication(ws *WebSocketConnection) (int, error) {
+	// 设置超时
+	timeout := time.After(15 * time.Second)
+	authenticated := false
+
+	for {
+		select {
+		case <-timeout:
+			return 0, fmt.Errorf("authentication timeout")
+		
+		default:
+			// 设置读取超时
+			ws.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			
+			message, err := ws.ReadMessage()
+			if err != nil {
+				// 忽略超时错误
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				return 0, err
+			}
+			
+			if *VERBOSE {
+				log.Printf("Received message: %s", message)
+			}
+			
+			// 处理认证流程
+			if strings.Contains(message, "Authentication required") {
+				if *VERBOSE {
+					log.Printf("Sending authentication: %s:%s", *USER, *PASSWORD)
+				}
+				authMsg := fmt.Sprintf("%s:%s\n", *USER, *PASSWORD)
+				if err := ws.WriteMessage(authMsg); err != nil {
+					return 0, err
+				}
+			} else if strings.Contains(message, "Authentication successful") {
+				if *VERBOSE {
+					log.Println("Authentication successful")
+				}
+				ws.authenticated = true
+				authenticated = true
+			} else if strings.Contains(message, "Authentication failed") {
+				return 0, fmt.Errorf("authentication failed")
+			} else if strings.Contains(message, "Only one connection per user allowed") {
+				return 0, fmt.Errorf("only one connection per user allowed")
+			}
+			
+			// 认证成功后检查连接类型
+			if authenticated {
+				if strings.Contains(message, "IPv4") {
+					return 6, nil
+				} else if strings.Contains(message, "IPv6") {
+					return 4, nil
+				} else if strings.Contains(message, "You are connecting via") {
+					// 尝试从消息中提取IP类型
+					if strings.Contains(message, "IPv4") {
+						return 6, nil
+					} else if strings.Contains(message, "IPv6") {
+						return 4, nil
+					}
+				}
+			}
+		}
+	}
+}
+
 func connect() {
-	log.Println("Connecting...")
+	log.Printf("Using protocol: %s", strings.ToUpper(*PROTOCOL))
+	
+	if *PROTOCOL == "websocket" {
+		connectWebSocket()
+	} else {
+		connectTCP()
+	}
+}
+
+func connectWebSocket() {
+	for {
+		log.Println("Connecting via WebSocket...")
+		
+		// 建立 WebSocket 连接
+		ws, err := websocketConnect()
+		if err != nil {
+			log.Printf("WebSocket connection failed: %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		defer ws.Close()
+		
+		if *VERBOSE {
+			log.Println("WebSocket connected, waiting for authentication...")
+		}
+		
+		// 处理认证
+		checkIP, err := handleWebSocketAuthentication(ws)
+		if err != nil {
+			log.Printf("Authentication failed: %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		
+		if *VERBOSE {
+			log.Println("Authentication successful, starting data reporting")
+		}
+		
+		// 主循环
+		timer := 0.0
+		item := ServerStatus{}
+		for {
+			// 收集系统信息
+			CPU := status.Cpu(*INTERVAL)
+			var netIn, netOut, netRx, netTx uint64
+			if !*isVnstat {
+				netIn, netOut, netRx, netTx = status.Traffic(*INTERVAL)
+			} else {
+				_, _, netRx, netTx = status.Traffic(*INTERVAL)
+				netIn, netOut, err = status.TrafficVnstat()
+				if err != nil {
+					log.Println("Please check if the installation of vnStat is correct")
+				}
+			}
+			memoryTotal, memoryUsed, swapTotal, swapUsed := status.Memory()
+			hddTotal, hddUsed := status.Disk(*INTERVAL)
+			uptime := status.Uptime()
+			load := status.Load()
+			
+			// 填充数据结构
+			item.CPU = jsoniter.Number(fmt.Sprintf("%.1f", CPU))
+			item.Load = jsoniter.Number(fmt.Sprintf("%.2f", load))
+			item.Uptime = uptime
+			item.MemoryTotal = memoryTotal
+			item.MemoryUsed = memoryUsed
+			item.SwapTotal = swapTotal
+			item.SwapUsed = swapUsed
+			item.HddTotal = hddTotal
+			item.HddUsed = hddUsed
+			item.NetworkRx = netRx
+			item.NetworkTx = netTx
+			item.NetworkIn = netIn
+			item.NetworkOut = netOut
+			
+			// 定期检查网络连通性
+			if timer <= 0 {
+				if checkIP == 4 {
+					item.Online4 = status.Network(checkIP)
+				} else if checkIP == 6 {
+					item.Online6 = status.Network(checkIP)
+				}
+				timer = 150.0
+			}
+			timer -= *INTERVAL
+			
+			// 序列化并发送数据
+			data, _ := json.Marshal(item)
+			message := fmt.Sprintf("update %s\n", string(data))
+			
+			if *VERBOSE {
+				log.Printf("Sending: %s", strings.TrimSpace(message))
+			}
+			
+			if err := ws.WriteMessage(message); err != nil {
+				log.Printf("WebSocket write error: %v", err)
+				break
+			}
+			
+			// 等待下一个间隔
+			time.Sleep(time.Duration(*INTERVAL*1000) * time.Millisecond)
+		}
+	}
+}
+
+func connectTCP() {
+	log.Println("Connecting via TCP...")
+	
 	conn, err := net.DialTimeout("tcp", *SERVER+":"+strconv.Itoa(*PORT), 30*time.Second)
 	if err != nil {
 		log.Println("Caught Exception:", err.Error())
@@ -54,6 +327,7 @@ func connect() {
 		_ = conn.Close()
 		time.Sleep(5 * time.Second)
 	}(conn)
+	
 	var buf = make([]byte, 128)
 	var data = status.BytesToString(buf)
 	n, err := conn.Read(buf)
@@ -61,21 +335,25 @@ func connect() {
 		log.Println("Caught Exception:", err.Error())
 		return
 	}
+	
 	log.Println(data[:n])
 	if !strings.Contains(data, "Authentication required") || err != nil {
 		return
 	} else {
 		_, _ = conn.Write([]byte((*USER + ":" + *PASSWORD + "\n")))
 	}
+	
 	n, _ = conn.Read(buf)
 	log.Println(data[:n])
 	if !strings.Contains(data, "Authentication successful") {
 		return
 	}
+	
 	if !strings.Contains(data, "You are connecting via") {
 		n, _ = conn.Read(buf)
 		log.Println(data[:n])
 	}
+	
 	timer := 0.0
 	checkIP := 0
 	if strings.Contains(data, "IPv4") {
@@ -85,6 +363,7 @@ func connect() {
 	} else {
 		return
 	}
+	
 	item := ServerStatus{}
 	for {
 		CPU := status.Cpu(*INTERVAL)
@@ -102,6 +381,7 @@ func connect() {
 		hddTotal, hddUsed := status.Disk(*INTERVAL)
 		uptime := status.Uptime()
 		load := status.Load()
+		
 		item.CPU = jsoniter.Number(fmt.Sprintf("%.1f", CPU))
 		item.Load = jsoniter.Number(fmt.Sprintf("%.2f", load))
 		item.Uptime = uptime
@@ -115,6 +395,7 @@ func connect() {
 		item.NetworkTx = netTx
 		item.NetworkIn = netIn
 		item.NetworkOut = netOut
+		
 		if timer <= 0 {
 			if checkIP == 4 {
 				item.Online4 = status.Network(checkIP)
@@ -124,34 +405,117 @@ func connect() {
 			timer = 150.0
 		}
 		timer -= *INTERVAL
+		
 		data, _ := json.Marshal(item)
 		_, err = conn.Write(status.StringToBytes("update " + status.BytesToString(data) + "\n"))
 		if err != nil {
 			log.Println(err.Error())
 			break
 		}
+		
+		time.Sleep(time.Duration(*INTERVAL*1000) * time.Millisecond)
 	}
 }
 
 func main() {
 	flag.Parse()
+
 	if *DSN != "" {
-		dsn := strings.Split(*DSN, "@")
-		prev := strings.Split(dsn[0], ":")
-		next := strings.Split(dsn[1], ":")
-		*USER = prev[0]
-		*PASSWORD = prev[1]
-		*SERVER = next[0]
-		if len(next) == 2 {
-			*PORT, _ = strconv.Atoi(next[1])
+		if strings.Contains(*DSN, "://") {
+			// 正确格式: protocol://username:password@host:port/path?query
+			u, err := url.Parse(*DSN)
+			if err != nil {
+				log.Fatalf("Invalid DSN format: %v", err)
+			}
+
+			// 提取用户名和密码
+			if u.User != nil {
+				*USER = u.User.Username()
+				if pwd, ok := u.User.Password(); ok {
+					*PASSWORD = pwd
+				}
+			}
+
+			// 设置协议
+			switch u.Scheme {
+			case "ws":
+				*PROTOCOL = "websocket"
+				*USE_SSL = false
+			case "wss":
+				*PROTOCOL = "websocket"
+				*USE_SSL = true
+			case "http":
+				*PROTOCOL = "tcp"
+				*USE_SSL = false
+			case "https":
+				*PROTOCOL = "tcp"
+				*USE_SSL = true
+			default:
+				*PROTOCOL = strings.ToLower(u.Scheme)
+			}
+
+			// 设置服务器和端口
+			*SERVER = u.Hostname()
+			if portStr := u.Port(); portStr != "" {
+				port, err := strconv.Atoi(portStr)
+				if err != nil {
+					log.Fatal("Invalid port in DSN")
+				}
+				*PORT = port
+			}
+
+			// 设置WebSocket路径
+			if u.Path != "" {
+				*PATH = u.Path
+			}
+		} else {
+			// 传统格式: username:password@host:port
+			dsnParts := strings.Split(*DSN, "@")
+			if len(dsnParts) != 2 {
+				log.Fatal("Invalid DSN format. Should be: username:password@host:port")
+			}
+
+			prev := strings.Split(dsnParts[0], ":")
+			if len(prev) != 2 {
+				log.Fatal("Invalid DSN format. Should be: username:password@host:port")
+			}
+
+			next := strings.Split(dsnParts[1], ":")
+			*USER = prev[0]
+			*PASSWORD = prev[1]
+			*SERVER = next[0]
+
+			if len(next) == 2 {
+				port, err := strconv.Atoi(next[1])
+				if err != nil {
+					log.Fatal("Invalid port in DSN")
+				}
+				*PORT = port
+			}
 		}
 	}
+	
+	// 验证端口范围
 	if *PORT < 1 || *PORT > 65535 {
 		log.Fatal("Check the port you input")
 	}
+	
+	// 验证必要参数
 	if *SERVER == "" || *USER == "" || *PASSWORD == "" {
 		log.Fatal("HOST, USERNAME, PASSWORD must not be blank!")
 	}
+	
+	// 验证协议选项
+	if *PROTOCOL != "tcp" && *PROTOCOL != "websocket" {
+		log.Fatal("Protocol must be either 'tcp' or 'websocket'")
+	}
+	
+	// 确保路径格式正确
+	if !strings.HasPrefix(*PATH, "/") {
+		*PATH = "/" + *PATH
+	}
+	
+	// 主循环
 	for {
 		connect()
 	}
