@@ -1,29 +1,74 @@
 # ServerStatus-goclient
 
-使用Golang写的ServerStatus-Hotaru客户端。
+使用Golang写的ServerStatus-Hotaru客户端，在原有基础上增加对Websocket的支持。
 
-请直接下载[release](https://github.com/cokemine/ServerStatus-goclient/releases)下的对应平台的二进制文件。
+## Usage
 
-## 使用说明
+```bash
+Usage of client:
+  -dsn string
+        Input DSN, format: username:password@host:port
+  -h string
+        Input the host of the server
+  -interval float
+        Input the INTERVAL (default 2)
+  -p string
+        Input the client's password
+  -path string
+        WebSocket path (default "/")
+  -port int
+        Input the port of the server (default 35601)
+  -protocol string
+        Protocol: tcp or websocket (default "tcp")
+  -ssl
+        Use SSL for websocket connection
+  -u string
+        Input the client's username
+  -verbose
+        Enable verbose logging
+  -vnstat
+        Use vnstat for traffic statistics, linux only
+```
+
+## 使用说明（以Linux为例）
+
+```bash
+git clone https://github.com/MJJSUN/ServerStatus-goclient.git
+
+go build -o status-client ./cmd/client
+
+chmod +x status-client
+```
 
 运行时需传入客户端对应参数。
 
-假设你的服务端地址是`yourip`，客户端用户名`username`，密码`password`
-
-端口号`35601`
-
-你可以这样运行
+假设你的服务端地址是`yourip`，客户端用户名`username`，密码`password`，端口号`port`
+```bash
+# WebSocket (SSL)
+./status-client -dsn "wss://username:password@yourip:port/path"
+```
 
 ```bash
-chmod +x status-client
-./status-client -dsn="username:password@yourip:35601"
+# WebSocket (非SSL)
+./status-client -dsn "ws://username:password@yourip:port/path"
+```
+
+```bash
+# TCP (传统格式)
+./status-client -dsn "username:password@yourip:port"
 ```
 
 即用户名密码以`:`分割，登录信息和服务器信息以`@`分割，地址与端口号以`:`分割。
 
 默认端口号是35601，所以你可以忽略端口号不写，即直接写`username:password@yourip`
 
-或者使用一键脚本
+你也可以直接使用参数运行
+
+```bash
+status-client -h yourip -u username -p password -port 443 -protocol websocket -ssl -path / -verbose
+```
+
+## 或者使用一键脚本（TODO）
 
 ```shell
 
@@ -46,23 +91,3 @@ bash install.sh reset_conf #(re)
 bash install.sh uninstall #(uni)
 
 ```
-
-## Usage
-
-```
-  -dsn string
-        Input DSN, format: username:password@host:port
-  -h string
-        Input the host of the server
-  -interval float
-        Input the INTERVAL (default 2.0)
-  -p string
-        Input the client's password
-  -port int
-        Input the port of the server (default 35601)
-  -u string
-        Input the client's username
-  -vnstat
-        Use vnstat for traffic statistics, linux only
-```
-
