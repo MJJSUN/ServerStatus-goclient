@@ -65,7 +65,7 @@ chmod +x status-client
 你也可以直接使用参数运行
 
 ```bash
-status-client -h yourip -u username -p password -port 443 -protocol websocket -ssl -path / -verbose
+./status-client -h yourip -u username -p password -port 443 -protocol websocket -ssl -path / -verbose
 ```
 
 ## 或者使用一键脚本（TODO）
