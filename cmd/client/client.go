@@ -220,98 +220,108 @@ func connect() {
 }
 
 func connectWebSocket() {
-	for {
-		log.Println("Connecting via WebSocket...")
-		
-		// 建立 WebSocket 连接
-		ws, err := websocketConnect()
-		if err != nil {
-			log.Printf("WebSocket connection failed: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		defer ws.Close()
-		
-		if *VERBOSE {
-			log.Println("WebSocket connected, waiting for authentication...")
-		}
-		
-		// 处理认证
-		checkIP, err := handleWebSocketAuthentication(ws)
-		if err != nil {
-			log.Printf("Authentication failed: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		
-		if *VERBOSE {
-			log.Println("Authentication successful, starting data reporting")
-		}
-		
-		// 主循环
-		timer := 0.0
-		item := ServerStatus{}
-		for {
-			// 收集系统信息
-			CPU := status.Cpu(*INTERVAL)
-			var netIn, netOut, netRx, netTx uint64
-			if !*isVnstat {
-				netIn, netOut, netRx, netTx = status.Traffic(*INTERVAL)
-			} else {
-				_, _, netRx, netTx = status.Traffic(*INTERVAL)
-				netIn, netOut, err = status.TrafficVnstat()
-				if err != nil {
-					log.Println("Please check if the installation of vnStat is correct")
-				}
-			}
-			memoryTotal, memoryUsed, swapTotal, swapUsed := status.Memory()
-			hddTotal, hddUsed := status.Disk(*INTERVAL)
-			uptime := status.Uptime()
-			load := status.Load()
-			
-			// 填充数据结构
-			item.CPU = jsoniter.Number(fmt.Sprintf("%.1f", CPU))
-			item.Load = jsoniter.Number(fmt.Sprintf("%.2f", load))
-			item.Uptime = uptime
-			item.MemoryTotal = memoryTotal
-			item.MemoryUsed = memoryUsed
-			item.SwapTotal = swapTotal
-			item.SwapUsed = swapUsed
-			item.HddTotal = hddTotal
-			item.HddUsed = hddUsed
-			item.NetworkRx = netRx
-			item.NetworkTx = netTx
-			item.NetworkIn = netIn
-			item.NetworkOut = netOut
-			
-			// 定期检查网络连通性
-			if timer <= 0 {
-				if checkIP == 4 {
-					item.Online4 = status.Network(checkIP)
-				} else if checkIP == 6 {
-					item.Online6 = status.Network(checkIP)
-				}
-				timer = 150.0
-			}
-			timer -= *INTERVAL
-			
-			// 序列化并发送数据
-			data, _ := json.Marshal(item)
-			message := fmt.Sprintf("update %s\n", string(data))
-			
-			if *VERBOSE {
-				log.Printf("Sending: %s", strings.TrimSpace(message))
-			}
-			
-			if err := ws.WriteMessage(message); err != nil {
-				log.Printf("WebSocket write error: %v", err)
-				break
-			}
-			
-			// 等待下一个间隔
-			time.Sleep(time.Duration(*INTERVAL*1000) * time.Millisecond)
-		}
-	}
+    // 捕获所有 panic，防止意外崩溃
+    defer func() {
+        if r := recover(); r != nil {
+            log.Printf("Recovered from panic in WebSocket loop: %v", r)
+        }
+    }()
+
+    for {
+        log.Println("Connecting via WebSocket...")
+
+        // 建立 WebSocket 连接
+        ws, err := websocketConnect()
+        if err != nil {
+            log.Printf("WebSocket connection failed: %v", err)
+            time.Sleep(5 * time.Second)
+            continue
+        }
+        // 成功连接后，无需 defer，后续手动 Close
+
+        if *VERBOSE {
+            log.Println("WebSocket connected, waiting for authentication...")
+        }
+
+        // 处理认证
+        checkIP, err := handleWebSocketAuthentication(ws)
+        if err != nil {
+            log.Printf("Authentication failed: %v", err)
+            ws.Close()
+            time.Sleep(5 * time.Second)
+            continue
+        }
+
+        if *VERBOSE {
+            log.Println("Authentication successful, starting data reporting")
+        }
+
+        // 主循环：收集系统信息并发送
+        timer := 0.0
+        item := ServerStatus{}
+        for {
+            // 收集系统信息
+            CPU := status.Cpu(*INTERVAL)
+            var netIn, netOut, netRx, netTx uint64
+            if !*isVnstat {
+                netIn, netOut, netRx, netTx = status.Traffic(*INTERVAL)
+            } else {
+                _, _, netRx, netTx = status.Traffic(*INTERVAL)
+                netIn, netOut, err = status.TrafficVnstat()
+                if err != nil {
+                    log.Println("Please check if the installation of vnStat is correct")
+                }
+            }
+            memoryTotal, memoryUsed, swapTotal, swapUsed := status.Memory()
+            hddTotal, hddUsed := status.Disk(*INTERVAL)
+            uptime := status.Uptime()
+            load := status.Load()
+
+            // 填充数据结构
+            item.CPU = jsoniter.Number(fmt.Sprintf("%.1f", CPU))
+            item.Load = jsoniter.Number(fmt.Sprintf("%.2f", load))
+            item.Uptime = uptime
+            item.MemoryTotal = memoryTotal
+            item.MemoryUsed = memoryUsed
+            item.SwapTotal = swapTotal
+            item.SwapUsed = swapUsed
+            item.HddTotal = hddTotal
+            item.HddUsed = hddUsed
+            item.NetworkRx = netRx
+            item.NetworkTx = netTx
+            item.NetworkIn = netIn
+            item.NetworkOut = netOut
+
+            // 定期检查网络连通性
+            if timer <= 0 {
+                if checkIP == 4 {
+                    item.Online4 = status.Network(checkIP)
+                } else if checkIP == 6 {
+                    item.Online6 = status.Network(checkIP)
+                }
+                timer = 150.0
+            }
+            timer -= *INTERVAL
+
+            // 序列化并发送数据
+            data, _ := json.Marshal(item)
+            message := fmt.Sprintf("update %s\n", string(data))
+            if *VERBOSE {
+                log.Printf("Sending: %s", strings.TrimSpace(message))
+            }
+            if err := ws.WriteMessage(message); err != nil {
+                log.Printf("WebSocket write error: %v", err)
+                ws.Close()
+                break
+            }
+
+            // 等待下一个间隔
+            time.Sleep(time.Duration(*INTERVAL*1000) * time.Millisecond)
+        }
+
+        // 断开后等待重连
+        time.Sleep(5 * time.Second)
+    }
 }
 
 func connectTCP() {
