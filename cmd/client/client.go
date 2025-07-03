@@ -58,7 +58,10 @@ func (ws *WebSocketConnection) ReadMessage() (string, error) {
 	if ws.conn == nil {
 		return "", fmt.Errorf("connection is closed")
 	}
-	
+
+  // 设置读超时，比如 10 秒
+  ws.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+
 	_, message, err := ws.conn.ReadMessage()
 	if err != nil {
 		return "", err
@@ -71,6 +74,9 @@ func (ws *WebSocketConnection) WriteMessage(message string) error {
 		return fmt.Errorf("connection is closed")
 	}
 	
+	// 设置写超时，比如 5 秒
+  ws.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+
 	return ws.conn.WriteMessage(websocket.TextMessage, []byte(message))
 }
 
@@ -105,7 +111,7 @@ func websocketConnect() (*WebSocketConnection, error) {
 	
 	// 设置 WebSocket 拨号器
 	dialer := websocket.Dialer{
-		HandshakeTimeout: 30 * time.Second,
+		HandshakeTimeout: 5 * time.Second,
 	}
 	
 	// 添加自定义头
