@@ -39,7 +39,7 @@ cd ServerStatus-goclient
 
 go get github.com/gorilla/websocket
 
-go build -o status-client ./cmd/client
+go build -trimpath -o status-client ./cmd/client
 
 chmod +x status-client
 ```
