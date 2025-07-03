@@ -59,9 +59,6 @@ func (ws *WebSocketConnection) ReadMessage() (string, error) {
 		return "", fmt.Errorf("connection is closed")
 	}
 
-  // 设置读超时，比如 10 秒
-  ws.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-
 	_, message, err := ws.conn.ReadMessage()
 	if err != nil {
 		return "", err
@@ -73,9 +70,6 @@ func (ws *WebSocketConnection) WriteMessage(message string) error {
 	if ws.conn == nil {
 		return fmt.Errorf("connection is closed")
 	}
-	
-	// 设置写超时，比如 5 秒
-  ws.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 
 	return ws.conn.WriteMessage(websocket.TextMessage, []byte(message))
 }
@@ -85,134 +79,163 @@ func (ws *WebSocketConnection) Close() {
 }
 
 func websocketConnect() (*WebSocketConnection, error) {
-	// 确定协议方案
-	scheme := "ws"
-	if *USE_SSL {
-		scheme = "wss"
-	}
-	
-	// 清理主机地址
-	host := *SERVER
-	if strings.Contains(host, "://") {
-		host = strings.Split(host, "://")[1]
-	}
-	host = strings.Split(host, "/")[0]
-	
-	// 构造 WebSocket URL
-	u := url.URL{
-		Scheme: scheme,
-		Host:   fmt.Sprintf("%s:%d", host, *PORT),
-		Path:   *PATH,
-	}
-	
-	if *VERBOSE {
-		log.Printf("Connecting to WebSocket: %s", u.String())
-	}
-	
-	// 设置 WebSocket 拨号器
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 5 * time.Second,
-	}
-	
-	// 添加自定义头
-	headers := make(map[string][]string)
-	headers["User-Agent"] = []string{"ServerStatus-GoClient"}
-	headers["Sec-WebSocket-Protocol"] = []string{"server-status"}
-	
-	// 建立连接
-	conn, _, err := dialer.Dial(u.String(), headers)
-	if err != nil {
-		return nil, err
-	}
-	
-	ws := &WebSocketConnection{
-		conn:         conn,
-		authenticated: false,
-	}
-	
-	// 设置心跳
-	conn.SetPingHandler(func(appData string) error {
-		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
-	})
-	
-	// 设置关闭处理
-	conn.SetCloseHandler(func(code int, text string) error {
-		if *VERBOSE {
-			log.Printf("WebSocket closed: %d %s", code, text)
-		}
-		return nil
-	})
-	
-	return ws, nil
+    // 确定协议方案
+    scheme := "ws"
+    if *USE_SSL {
+        scheme = "wss"
+    }
+    
+    // 清理主机地址
+    host := *SERVER
+    if strings.Contains(host, "://") {
+        host = strings.Split(host, "://")[1]
+    }
+    host = strings.Split(host, "/")[0]
+    
+    // 构造 WebSocket URL
+    u := url.URL{
+        Scheme: scheme,
+        Host:   fmt.Sprintf("%s:%d", host, *PORT),
+        Path:   *PATH,
+    }
+    
+    if *VERBOSE {
+        log.Printf("Connecting to WebSocket: %s", u.String())
+    }
+    
+    // 设置 WebSocket 拨号器（修复 NetDial 类型错误）
+    dialer := websocket.Dialer{
+        HandshakeTimeout: 3 * time.Second,
+        NetDial: func(network, addr string) (net.Conn, error) {
+            d := net.Dialer{Timeout: 5 * time.Second}
+            return d.Dial(network, addr)
+        },
+    }
+    
+    // 添加自定义头
+    headers := make(map[string][]string)
+    headers["User-Agent"] = []string{"ServerStatus-GoClient"}
+    headers["Sec-WebSocket-Protocol"] = []string{"server-status"}
+    
+    // 建立连接
+    conn, _, err := dialer.Dial(u.String(), headers)
+    if err != nil {
+        return nil, err
+    }
+    
+    ws := &WebSocketConnection{
+        conn:         conn,
+        authenticated: false,
+    }
+    
+    // 设置心跳
+    conn.SetPingHandler(func(appData string) error {
+        return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(20*time.Second))
+    })
+    
+    // 设置 Pong 处理器
+    conn.SetPongHandler(func(string) error {
+        conn.SetReadDeadline(time.Now().Add(25 * time.Second))
+        return nil
+    })
+    
+    // 设置关闭处理
+    conn.SetCloseHandler(func(code int, text string) error {
+        if *VERBOSE {
+            log.Printf("WebSocket closed: %d %s", code, text)
+        }
+        return nil
+    })
+    
+    return ws, nil
 }
 
-// ... 其他代码保持不变 ...
-
-func handleWebSocketAuthentication(ws *WebSocketConnection) (int, error) {
-	// 设置超时
-	timeout := time.After(15 * time.Second)
-	authenticated := false
-
-	for {
-		select {
-		case <-timeout:
-			return 0, fmt.Errorf("authentication timeout")
-		
-		default:
-			// 设置读取超时
-			ws.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-			
-			message, err := ws.ReadMessage()
-			if err != nil {
-				// 忽略超时错误
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					continue
-				}
-				return 0, err
-			}
-			
-			if *VERBOSE {
-				log.Printf("Received message: %s", message)
-			}
-			
-			// 处理认证流程
-			if strings.Contains(message, "Authentication required") {
-				if *VERBOSE {
-					log.Printf("Sending authentication: %s:%s", *USER, *PASSWORD)
-				}
-				authMsg := fmt.Sprintf("%s:%s\n", *USER, *PASSWORD)
-				if err := ws.WriteMessage(authMsg); err != nil {
-					return 0, err
-				}
-			} else if strings.Contains(message, "Authentication successful") {
-				if *VERBOSE {
-					log.Println("Authentication successful")
-				}
-				ws.authenticated = true
-				authenticated = true
-			} else if strings.Contains(message, "Authentication failed") {
-				return 0, fmt.Errorf("authentication failed")
-			} else if strings.Contains(message, "Only one connection per user allowed") {
-				return 0, fmt.Errorf("only one connection per user allowed")
-			}
-			
-			// 认证成功后检查连接类型
-			if authenticated {
-				if strings.Contains(message, "IPv4") {
-					return 6, nil
-				} else if strings.Contains(message, "IPv6") {
-					return 4, nil
-				} else if strings.Contains(message, "You are connecting via") {
-					// 尝试从消息中提取IP类型
-					if strings.Contains(message, "IPv4") {
-						return 6, nil
-					} else if strings.Contains(message, "IPv6") {
-						return 4, nil
-					}
-				}
-			}
-		}
-	}
+func handleWebSocketAuthentication(ws *WebSocketConnection, disconnectChan chan struct{}) (int, error) {
+    // 设置超时
+    timeout := time.After(5 * time.Second)
+    authenticated := false
+    
+    // 创建认证阶段的错误通道
+    authErrChan := make(chan error, 1)
+    
+    // 启动读goroutine
+    go func() {
+        for {
+            // 设置读取超时
+            ws.conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+            
+            message, err := ws.ReadMessage()
+            if err != nil {
+                // 忽略超时错误
+                if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+                    continue
+                }
+                authErrChan <- err
+                return
+            }
+            
+            if *VERBOSE {
+                log.Printf("Received auth message: %s", message)
+            }
+            
+            // 处理认证流程
+            if strings.Contains(message, "Authentication required") {
+                if *VERBOSE {
+                    log.Printf("Sending authentication: %s:%s", *USER, *PASSWORD)
+                }
+                authMsg := fmt.Sprintf("%s:%s\n", *USER, *PASSWORD)
+                if err := ws.WriteMessage(authMsg); err != nil {
+                    authErrChan <- err
+                    return
+                }
+            } else if strings.Contains(message, "Authentication successful") {
+                if *VERBOSE {
+                    log.Println("Authentication successful")
+                }
+                ws.authenticated = true
+                authenticated = true
+            } else if strings.Contains(message, "Authentication failed") {
+                authErrChan <- fmt.Errorf("authentication failed")
+                return
+            } else if strings.Contains(message, "Only one connection per user allowed") {
+                authErrChan <- fmt.Errorf("only one connection per user allowed")
+                return
+            }
+            
+            // 认证成功后检查连接类型
+            if authenticated {
+                if strings.Contains(message, "IPv4") {
+                    authErrChan <- nil // 表示成功
+                    return
+                } else if strings.Contains(message, "IPv6") {
+                    authErrChan <- nil // 表示成功
+                    return
+                } else if strings.Contains(message, "You are connecting via") {
+                    // 尝试从消息中提取IP类型
+                    if strings.Contains(message, "IPv4") {
+                        authErrChan <- nil // 表示成功
+                        return
+                    } else if strings.Contains(message, "IPv6") {
+                        authErrChan <- nil // 表示成功
+                        return
+                    }
+                }
+            }
+        }
+    }()
+    
+    // 等待认证结果
+    select {
+    case err := <-authErrChan:
+        if err == nil {
+            return 6, nil // 默认返回IPv6检查
+        }
+        return 0, err
+    case <-timeout:
+        return 0, fmt.Errorf("authentication timeout")
+    case <-disconnectChan:
+        return 0, fmt.Errorf("connection closed during authentication")
+    }
 }
 
 func connect() {
@@ -226,46 +249,118 @@ func connect() {
 }
 
 func connectWebSocket() {
-    // 捕获所有 panic，防止意外崩溃
-    defer func() {
-        if r := recover(); r != nil {
-            log.Printf("Recovered from panic in WebSocket loop: %v", r)
-        }
-    }()
-
+    // 指数退避重连策略
+    reconnectDelay := 3 * time.Second
+    maxReconnectDelay := 30 * time.Second
+    
+    // 主连接循环
     for {
         log.Println("Connecting via WebSocket...")
-
+        
         // 建立 WebSocket 连接
         ws, err := websocketConnect()
         if err != nil {
             log.Printf("WebSocket connection failed: %v", err)
-            time.Sleep(5 * time.Second)
+            time.Sleep(reconnectDelay)
+            // 指数退避
+            reconnectDelay = minDuration(reconnectDelay*2, maxReconnectDelay)
             continue
         }
-        // 成功连接后，无需 defer，后续手动 Close
-
+        
         if *VERBOSE {
             log.Println("WebSocket connected, waiting for authentication...")
         }
 
+        // 创建断开信号通道
+        disconnectChan := make(chan struct{}, 2)
+        
         // 处理认证
-        checkIP, err := handleWebSocketAuthentication(ws)
+        checkIP, err := handleWebSocketAuthentication(ws, disconnectChan)
         if err != nil {
             log.Printf("Authentication failed: %v", err)
             ws.Close()
-            time.Sleep(5 * time.Second)
+            time.Sleep(reconnectDelay)
+            // 指数退避
+            reconnectDelay = minDuration(reconnectDelay*2, maxReconnectDelay)
             continue
         }
 
         if *VERBOSE {
             log.Println("Authentication successful, starting data reporting")
         }
+        
+        // 重置重连延迟（连接成功后）
+        reconnectDelay = 3 * time.Second
+
+        // 启动心跳检测
+        go func() {
+            ticker := time.NewTicker(15 * time.Second)
+            defer ticker.Stop()
+            
+            failCount := 0
+            maxFailCount := 2
+            
+            for {
+                select {
+                case <-ticker.C:
+                    ws.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+                    if err := ws.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+                        failCount++
+                        if *VERBOSE {
+                            log.Printf("Ping failed (%d/%d): %v", failCount, maxFailCount, err)
+                        }
+                        
+                        if failCount >= maxFailCount {
+                            log.Println("Max ping failures reached, triggering reconnect")
+                            disconnectChan <- struct{}{}
+                            return
+                        }
+                    } else {
+                        failCount = 0
+                        if *VERBOSE {
+                            log.Println("Ping sent successfully")
+                        }
+                    }
+                }
+            }
+        }()
+
+        // 启动读错误检测
+        go func() {
+            for {
+                ws.conn.SetReadDeadline(time.Now().Add(25 * time.Second))
+                _, _, err := ws.conn.ReadMessage()
+                if err != nil {
+                    if *VERBOSE {
+                        log.Printf("Read error: %v, triggering reconnect", err)
+                    }
+                    disconnectChan <- struct{}{}
+                    return
+                }
+            }
+        }()
 
         // 主循环：收集系统信息并发送
         timer := 0.0
         item := ServerStatus{}
+        
+        // 快速重连标志
+        reconnectRequested := false
+        
         for {
+            select {
+            case <-disconnectChan:
+                log.Println("Disconnect signal received, reconnecting...")
+                reconnectRequested = true
+                break
+            case <-time.After(time.Duration(*INTERVAL*1000) * time.Millisecond):
+                // 正常收集数据
+            }
+            
+            if reconnectRequested {
+                break
+            }
+            
             // 收集系统信息
             CPU := status.Cpu(*INTERVAL)
             var netIn, netOut, netRx, netTx uint64
@@ -315,19 +410,33 @@ func connectWebSocket() {
             if *VERBOSE {
                 log.Printf("Sending: %s", strings.TrimSpace(message))
             }
+            
+            // 尝试发送数据
             if err := ws.WriteMessage(message); err != nil {
-                log.Printf("WebSocket write error: %v", err)
-                ws.Close()
+                log.Printf("Write error: %v, triggering reconnect", err)
+                disconnectChan <- struct{}{}
                 break
             }
-
-            // 等待下一个间隔
-            time.Sleep(time.Duration(*INTERVAL*1000) * time.Millisecond)
         }
-
-        // 断开后等待重连
-        time.Sleep(5 * time.Second)
+        
+        // 确保连接关闭
+        ws.Close()
+        
+        // 等待重连
+        log.Printf("Reconnecting in %v...", reconnectDelay)
+        time.Sleep(reconnectDelay)
+        
+        // 指数退避
+        reconnectDelay = minDuration(reconnectDelay*2, maxReconnectDelay)
     }
+}
+
+// 辅助函数：取两个时间的最小值
+func minDuration(a, b time.Duration) time.Duration {
+    if a < b {
+        return a
+    }
+    return b
 }
 
 func connectTCP() {
