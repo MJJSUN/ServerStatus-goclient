@@ -20,7 +20,7 @@ var (
 	PORT     = flag.Int("port", 35601, "Input the port of the server")
 	USER     = flag.String("u", "", "Input the client's username")
 	PASSWORD = flag.String("p", "", "Input the client's password")
-	INTERVAL = flag.Float64("interval", 2.0, "Input the INTERVAL")
+	INTERVAL = flag.Float64("interval", 1.0, "Input the INTERVAL")
 	DSN      = flag.String("dsn", "", "Input DSN, format: username:password@host:port")
 	isVnstat = flag.Bool("vnstat", false, "Use vnstat for traffic statistics, linux only")
 	PROTOCOL = flag.String("protocol", "tcp", "Protocol: tcp or websocket")
@@ -294,7 +294,7 @@ func connectWebSocket() {
 		reconnectDelay = 3 * time.Second
 
 		// 启动心跳检测
-		heartbeatTicker := time.NewTicker(15 * time.Second)
+		heartbeatTicker := time.NewTicker(10 * time.Second)
 		heartbeatFailCount := 0
 		maxHeartbeatFailCount := 2
 
@@ -406,7 +406,7 @@ func connectWebSocket() {
 				}
 
 				// 尝试发送数据，设置更短的写超时
-				ws.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+				ws.conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
 				if err := ws.conn.WriteMessage(websocket.TextMessage, []byte(message)); err != nil {
 					writeFailCount++
 					log.Printf("Write failed (%d/%d): %v", writeFailCount, maxWriteFailCount, err)
