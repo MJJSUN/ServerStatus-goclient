@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cokemine/ServerStatus-goclient/pkg/status"
@@ -49,25 +50,35 @@ type ServerStatus struct {
 	Online6     bool            `json:"online6"`
 }
 
+// 修改 WebSocketConnection 结构体和相关方法
 type WebSocketConnection struct {
 	conn          *websocket.Conn
 	authenticated bool
+	closed        bool       // 添加状态标志
+	closeMutex    sync.Mutex // 添加互斥锁保证线程安全
 }
 
+// 更新 ReadMessage 方法
 func (ws *WebSocketConnection) ReadMessage() (string, error) {
-	if ws.conn == nil {
+	if ws.IsClosed() {
 		return "", fmt.Errorf("connection is closed")
 	}
 
 	_, message, err := ws.conn.ReadMessage()
 	if err != nil {
+		// 检查是否是关闭错误
+		if websocket.IsCloseError(err, websocket.CloseNormalClosure,
+			websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+			ws.Close() // 标记连接已关闭
+		}
 		return "", err
 	}
 	return string(message), nil
 }
 
+// 更新 WriteMessage 方法
 func (ws *WebSocketConnection) WriteMessage(message string) error {
-	if ws.conn == nil {
+	if ws.IsClosed() {
 		return fmt.Errorf("connection is closed")
 	}
 
@@ -75,7 +86,19 @@ func (ws *WebSocketConnection) WriteMessage(message string) error {
 }
 
 func (ws *WebSocketConnection) Close() {
-	ws.conn.Close()
+	ws.closeMutex.Lock()
+	defer ws.closeMutex.Unlock()
+
+	if !ws.closed && ws.conn != nil {
+		ws.conn.Close()
+		ws.closed = true
+	}
+}
+
+func (ws *WebSocketConnection) IsClosed() bool {
+	ws.closeMutex.Lock()
+	defer ws.closeMutex.Unlock()
+	return ws.closed
 }
 
 func websocketConnect() (*WebSocketConnection, error) {
@@ -126,6 +149,7 @@ func websocketConnect() (*WebSocketConnection, error) {
 	ws := &WebSocketConnection{
 		conn:          conn,
 		authenticated: false,
+		closed:        false, // 初始化状态
 	}
 
 	// 设置心跳
@@ -141,6 +165,7 @@ func websocketConnect() (*WebSocketConnection, error) {
 
 	// 设置关闭处理
 	conn.SetCloseHandler(func(code int, text string) error {
+		ws.Close() // 调用自定义关闭方法
 		if *VERBOSE {
 			log.Printf("WebSocket closed: %d %s", code, text)
 		}
@@ -151,7 +176,6 @@ func websocketConnect() (*WebSocketConnection, error) {
 }
 
 func handleWebSocketAuthentication(ws *WebSocketConnection, disconnectChan chan struct{}) (int, error) {
-	// 设置超时
 	timeout := time.After(5 * time.Second)
 	authenticated := false
 
@@ -160,7 +184,20 @@ func handleWebSocketAuthentication(ws *WebSocketConnection, disconnectChan chan 
 
 	// 启动读goroutine
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// 捕获并处理panic
+				authErrChan <- fmt.Errorf("read panic: %v", r)
+			}
+		}()
+
 		for {
+			// 检查连接是否已关闭
+			if ws.IsClosed() {
+				authErrChan <- fmt.Errorf("connection closed")
+				return
+			}
+
 			// 设置读取超时
 			ws.conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 
@@ -256,7 +293,6 @@ func connectWebSocket() {
 	// 主连接循环
 	for {
 		log.Println("Connecting via WebSocket...")
-		startTime := time.Now() // 记录连接开始时间
 
 		// 建立 WebSocket 连接
 		ws, err := websocketConnect()
@@ -269,7 +305,7 @@ func connectWebSocket() {
 		}
 
 		if *VERBOSE {
-			log.Printf("WebSocket connected in %v, waiting for authentication...", time.Since(startTime))
+			log.Println("WebSocket connected, waiting for authentication...")
 		}
 
 		// 创建断开信号通道
@@ -298,14 +334,30 @@ func connectWebSocket() {
 		heartbeatFailCount := 0
 		maxHeartbeatFailCount := 2
 
-		// 启动读错误检测
+		// 启动读错误检测（安全版本）
 		readErrChan := make(chan error, 1)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					readErrChan <- fmt.Errorf("read panic: %v", r)
+				}
+			}()
+
 			for {
+				if ws.IsClosed() {
+					readErrChan <- fmt.Errorf("connection closed")
+					return
+				}
+
 				ws.conn.SetReadDeadline(time.Now().Add(25 * time.Second))
 				_, _, err := ws.conn.ReadMessage()
 				if err != nil {
-					readErrChan <- err
+					// 检查是否是正常关闭错误
+					if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+						readErrChan <- fmt.Errorf("connection closed normally")
+					} else {
+						readErrChan <- err
+					}
 					return
 				}
 			}
@@ -336,6 +388,12 @@ func connectWebSocket() {
 				break connectionLoop
 
 			case <-heartbeatTicker.C:
+				if ws.IsClosed() {
+					log.Println("Connection closed during heartbeat")
+					reconnectRequested = true
+					break connectionLoop
+				}
+
 				ws.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if err := ws.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 					heartbeatFailCount++
@@ -355,6 +413,13 @@ func connectWebSocket() {
 				}
 
 			case <-time.After(time.Duration(*INTERVAL*1000) * time.Millisecond):
+				// 检查连接状态
+				if ws.IsClosed() {
+					log.Println("Connection closed during data collection")
+					reconnectRequested = true
+					break connectionLoop
+				}
+
 				// 收集系统信息
 				CPU := status.Cpu(*INTERVAL)
 				var netIn, netOut, netRx, netTx uint64
@@ -397,7 +462,6 @@ func connectWebSocket() {
 					timer = 150.0
 				}
 				timer -= *INTERVAL
-
 				// 序列化并发送数据
 				data, _ := json.Marshal(item)
 				message := fmt.Sprintf("update %s\n", string(data))
@@ -429,7 +493,9 @@ func connectWebSocket() {
 		heartbeatTicker.Stop()
 
 		// 确保连接关闭
-		ws.Close()
+		if ws != nil && !ws.IsClosed() {
+			ws.Close()
+		}
 
 		// 等待重连
 		log.Printf("Reconnecting in %v...", reconnectDelay)
