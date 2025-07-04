@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - 'v*'
 
 jobs:
   release:
@@ -17,7 +17,7 @@ jobs:
       - name: Run GoReleaser
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PACKAGE_NAME: github.com/cokemine/ServerStatus-goclient
+          PACKAGE_NAME: github.com/MJJSUN/ServerStatus-goclient
         run: |-
           docker run \
               --rm \
@@ -29,4 +29,4 @@ jobs:
               -w /go/src/${PACKAGE_NAME} \
               goreleaser/goreleaser-cross \
               -f .goreleaser_action.yml \
-              release --rm-dist 
+              release
