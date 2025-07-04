@@ -54,7 +54,10 @@ function install_dependencies() {
 }
 
 function input_dsn() {
-  echo -e "${Info} 请输入服务端的 DSN, 格式为 “username:password@masterip(:port)”"
+  echo -e "${Info} 请输入服务端的 DSN，支持如下格式："
+  echo -e "${Tip} 传统TCP: username:password@masterip(:port)"
+  echo -e "${Tip} WebSocket: ws://username:password@host:port/path"
+  echo -e "${Tip} 安全WebSocket: wss://username:password@host:port/path"
   read -re dsn
 }
 
@@ -66,7 +69,7 @@ function write_service() {
   cat >${service_conf} <<-EOF
 [Unit]
 Description=ServerStatus-Client
-Documentation=https://github.com/cokemine/ServerStatus-goclient
+Documentation=https://github.com/MJJSUN/ServerStatus-goclient
 After=network.target
 
 [Service]
@@ -131,7 +134,7 @@ function install_client() {
   esac
   echo -e "${Info} 下载 ${arch} 二进制文件"
   mkdir -p /usr/local/ServerStatus/client/
-  cd /tmp && wget "https://github.com/cokemine/ServerStatus-goclient/releases/latest/download/status-client_linux_${arch}.tar.gz"
+  cd /tmp && wget "https://github.com/MJJSUN/ServerStatus-goclient/releases/latest/download/status-client_linux_${arch}.tar.gz"
   tar -zxvf "status-client_linux_${arch}.tar.gz" status-client
   mv status-client /usr/local/ServerStatus/client/
   chmod +x /usr/local/ServerStatus/client/status-client
