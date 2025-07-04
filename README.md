@@ -11,7 +11,7 @@ Usage of client:
   -h string
         Input the host of the server
   -interval float
-        Input the INTERVAL (default 2)
+        Input the INTERVAL (default 1)
   -p string
         Input the client's password
   -path string
