@@ -72,11 +72,11 @@ chmod +x status-client
 ./status-client -h yourip -u username -p password -port 443 -protocol websocket -ssl -path / -verbose
 ```
 
-## 或者使用一键脚本（TODO）
+## 或者使用一键脚本
 
 ```shell
 
-wget https://raw.githubusercontent.com/cokemine/ServerStatus-goclient/master/install.sh
+wget https://raw.githubusercontent.com/MJJSUN/ServerStatus-goclient/master/install.sh
 
 #安装
 
@@ -84,7 +84,7 @@ bash install.sh
 
 #或
 
-bash install.sh -dsn username:password@yourip:35601
+bash install.sh -dsn "xxx"
 
 #修改配置
 
